@@ -70,6 +70,7 @@ import           Control.Monad.Fail (fail)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Short as SBS
 import           Data.Coerce
+import qualified Data.Map.Strict as Map
 import           Data.String
 
 import qualified Cardano.Binary as CBOR
@@ -512,7 +513,7 @@ genTxBodyContent era = do
   txMetadata <- genTxMetadataInEra era
   txAuxScripts <- genTxAuxScripts era
   let txExtraKeyWits = TxExtraKeyWitnessesNone --TODO: Alonzo era: Generate witness key hashes
-  txProtocolParams <- BuildTxWith <$> Gen.maybe (genProtocolParameters era)
+  txProtocolParams <- BuildTxWith <$> Gen.maybe genProtocolParameters
   txWithdrawals <- genTxWithdrawals era
   txCertificates <- genTxCertificates era
   txUpdateProposal <- genTxUpdateProposal era
@@ -679,8 +680,8 @@ genPraosNonce = makePraosNonce <$> Gen.bytes (Range.linear 0 32)
 genMaybePraosNonce :: Gen (Maybe PraosNonce)
 genMaybePraosNonce = Gen.maybe genPraosNonce
 
-genProtocolParameters :: CardanoEra era -> Gen ProtocolParameters
-genProtocolParameters era =
+genProtocolParameters :: Gen ProtocolParameters
+genProtocolParameters =
   ProtocolParameters
     <$> ((,) <$> genNat <*> genNat)
     <*> genRational
@@ -700,7 +701,7 @@ genProtocolParameters era =
     <*> genRational
     <*> genRational
     <*> Gen.maybe genLovelace
-    <*> genCostModels era
+    <*> genCostModels
     <*> Gen.maybe genExecutionUnitPrices
     <*> Gen.maybe genExecutionUnits
     <*> Gen.maybe genExecutionUnits
@@ -727,14 +728,15 @@ genProtocolParametersUpdate era = do
   protocolUpdatePoolPledgeInfluence <- Gen.maybe genRationalInt64
   protocolUpdateMonetaryExpansion   <- Gen.maybe genRational
   protocolUpdateTreasuryCut         <- Gen.maybe genRational
-  protocolUpdateUTxOCostPerWord     <- ifAlonzoBased era genLovelace
-  protocolUpdateCostModels          <- genCostModels era
-  protocolUpdatePrices              <- ifAlonzoBased era genExecutionUnitPrices
-  protocolUpdateMaxTxExUnits        <- ifAlonzoBased era genExecutionUnits
-  protocolUpdateMaxBlockExUnits     <- ifAlonzoBased era genExecutionUnits
-  protocolUpdateMaxValueSize        <- ifAlonzoBased era genNat
-  protocolUpdateCollateralPercent   <- ifAlonzoBased era genNat
-  protocolUpdateMaxCollateralInputs <- ifAlonzoBased era genNat
+  protocolUpdateUTxOCostPerWord     <- alonzoParam era genLovelace
+  protocolUpdateCostModels          <- alonzoParam era genCostModels
+                                        <&> fromMaybe Map.empty
+  protocolUpdatePrices              <- alonzoParam era genExecutionUnitPrices
+  protocolUpdateMaxTxExUnits        <- alonzoParam era genExecutionUnits
+  protocolUpdateMaxBlockExUnits     <- alonzoParam era genExecutionUnits
+  protocolUpdateMaxValueSize        <- alonzoParam era genNat
+  protocolUpdateCollateralPercent   <- alonzoParam era genNat
+  protocolUpdateMaxCollateralInputs <- alonzoParam era genNat
   pure ProtocolParametersUpdate{..}
 
 
@@ -755,15 +757,11 @@ genCostModel = case Plutus.defaultCostModelParams of
     -- Plutus version we're using, once we support multiple Plutus versions.
     <$> mapM (const $ Gen.integral (Range.linear 0 5000)) dcm
 
-genCostModels :: CardanoEra era -> Gen (Map AnyPlutusScriptVersion CostModel)
-genCostModels era
-  | isAlonzoBased era =
-      Gen.map
-        (Range.linear 0 (length plutusScriptVersions))
-        ((,)
-          <$> Gen.element plutusScriptVersions
-          <*> genCostModel)
-  | otherwise = pure mempty
+genCostModels :: Gen (Map AnyPlutusScriptVersion CostModel)
+genCostModels =
+  Gen.map
+    (Range.linear 0 (length plutusScriptVersions))
+    ((,) <$> Gen.element plutusScriptVersions <*> genCostModel)
   where
     plutusScriptVersions :: [AnyPlutusScriptVersion]
     plutusScriptVersions = [minBound..maxBound]
@@ -772,11 +770,13 @@ genExecutionUnits :: Gen ExecutionUnits
 genExecutionUnits = ExecutionUnits <$> Gen.integral (Range.constant 0 1000)
                                    <*> Gen.integral (Range.constant 0 1000)
 
--- | 'Gen.maybe' but with condition if era is Alonzo-based
-ifAlonzoBased :: CardanoEra era -> Gen a -> Gen (Maybe a)
-ifAlonzoBased era gen
-  | isAlonzoBased era = Gen.maybe gen
-  | otherwise         = pure Nothing
+-- | Gen for Alonzo-specific parameters
+alonzoParam :: CardanoEra era -> Gen a -> Gen (Maybe a)
+alonzoParam era gen =
+  case era of
+    AlonzoEra             -> Just <$> gen
+    _ | isAlonzoBased era -> Gen.maybe gen
+      | otherwise         -> pure Nothing
 
 -- | 'Gen.maybe' but with condition if era is not Alonzo-based
 untilAlonzo :: CardanoEra era -> Gen a -> Gen (Maybe a)
